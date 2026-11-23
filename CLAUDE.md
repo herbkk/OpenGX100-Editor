@@ -102,14 +102,46 @@ sandbox, writes `extracted/*.json` incl. `tables.json`) and `opengx100-extract` 
     `CurrentPatch` (then re-reads Temp), pedal-side WRITE (re-reads that patch). Background jobs, one step per loop
     pass: name scan, `BackupJob`, `SetlistJob` (write + read back + compare). `writable()` only lets `WriteBytes`
     reach the Temp patch and system areas.
+    **Disconnects** (2026-11-22): the UI thread keeps an `opengx100_midi::PortWatch` (CoreMIDI clients made on the
+    main thread, whose run loop keeps their port list current) and checks the pedal's port names every 1 s; gone →
+    `Cmd::Disconnected` (worker drops the `Device`, stops jobs) + `Conn::Lost`; back → reconnect (retried while the
+    pedal is still starting up). Not yet verified that CoreMIDI drops the ports when the pedal is switched off.
+    `reread_temp` (after a pushed patch change) tries 3× (wait for IS_RQ1_ACCEPT, read): 2026-11-22 the owner saw
+    "no answer (read 129 bytes at 10 00 00 00)" right after a WRITE from the app, leaving a stale live patch that
+    later pushes (assign CTL → SOLO SW / PITCH SHIFTER on-off, confirmed pushed via `monitor`) were applied to.
+    `log.rs`: the worker logs pushed DT1s, our writes, connect/WRITE/select, re-read attempts and errors to
+    `<data dir>/logs/editor.log` (fresh each launch, previous run kept as `editor-previous.log`, 20 MB cap; off
+    under `cargo test`); `OPENGX100_LOG=1` also prints to stderr. Read it to debug what the owner saw.
   - `app.rs` — window, patch list, live editor (Patch tab), chain diagram (split/rejoin wiring; active branch solid
     blue, inactive dashed/dimmed; DIVIDER caption "A only/B only/A + B"), FX param editor, events.
   - `app/editing.rs` — value widgets (ComboBox for labelled values, checkbox for 2-value, slider otherwise), writes
     (`set_temp_param`, `set_fx_param`, `set_fx_switch`, `set_sys_param`), unsaved-changes check (`patch_differs`:
     ignores pedal-position and the led block), CTL/EXP, IN/OUT, System menus, dialogs (Write, unsaved switch,
     save input setting, confirm setlist write).
+  - `app/controls.rs` — FX editor controls (2026-11-22, owner's design): knobs (amounts, times, any list whose
+    labels are a scale), faders (LEVEL/VOLUME/DIRECT MIX/pedal position and every GRAPHIC EQ band; on a PREAMP the tone stack is knobs and
+    SAG/RESONANCE/DIRECT MIX/MIC POSITION/MIC LEVEL faders; on drive pedals everything is a knob), toggle switch (OFF/ON), radio buttons (lists < 6), drop-down (longer lists of names).
+    Layout per set ("1:", "HR1:", "A:" prefixes): knob row, fader row (top-aligned `controls::row`), then a grid of the rest. PARAMETRIC EQ
+    and the Global EQ (IN/OUT; `controls::eq_sections`, + an ON switch by its title):
+    sections LOW / LOW-MID / HIGH-MID / HIGH / OUTPUT split by lines, knobs stacked left, gain fader right.
+    Drag up/down (Shift fine), double-click = init value, click on a fader track jumps; mouse wheel turns
+    the hovered control (~1% of the range a step, Shift = 1) only after the pointer rested 0.25 s on it and the
+    page hasn't scrolled for 0.5 s (so scrolling past never changes a sound). `FxParamDef::unit()`: a one-entry list like `[dB]` is a unit.
   - `app/assigns.rs` — CTL/EXP → Assigns page. `app/tuner.rs` — Tuner tab (`sync_tuner`: on while the tab is
     open; `pedal_running_mode`: the pedal's footswitch opens/closes it; echoes within 0.5 s of our own command ignored).
+  - `app/eq_graph.rs` — frequency-response graph for PARAMETRIC EQUALIZER (FX editor) and the Global EQ (IN/OUT):
+    textbook filters (shelves at an assumed 100 Hz / 8 kHz, cuts 12 dB/oct: the pedal's real shapes are unknown),
+    draggable dots (mid bands: freq + gain; shelves: gain; cuts: freq, FLAT at the edges; double-click = neutral). Hovering the plot: a vertical line + readout (Hz, dB, range name), the
+    range shaded, tooltip on what boosting/cutting it does (`REGIONS`, rules of thumb in our own words).
+  - `app/auto_write.rs` — Auto-write switch + minutes (1–120) next to Write…: every period, if the live patch
+    differs from the stored copy, `Cmd::SavePatch` into the current patch under the live name. Waits while a dialog,
+    drag, chain edit, setlist write, Temp read or the Tuner tab is active; any WRITE restarts the period. Settings in
+    `store::Settings` (`settings.json`).
+  - `app/presets.rs` — FX presets (2026-11-23): "Presets ▾" by the effect's name: Save as preset… (name defaults to
+    the patch name), the type's presets (click = load, ✕ = delete), Show presets folder. Files
+    `<data dir>/presets/<FX TYPE>/<name>.json` (`store::Preset`: type name + `unique_name` → stored value; no
+    type/switch/pedal-position). Load = one DT1 per differing param (same as turning knobs); missing or out-of-range
+    values keep theirs. Only same-type loads (no Replace). Not yet tried on the pedal.
   - `app/setlists.rs` — Setlists tab; `app/backups.rs` — Backups tab; `store.rs` — persistence.
 - `crates/opengx100-protocol/fixtures/{tables,docs}.json` — SYNTHETIC tables (made-up FX), embedded as the fallback
 - `crates/opengx100-extract` — boa + dirs: `find_app`, `app_version`, `extract` (core.js in boa), `prepare` (env → cache

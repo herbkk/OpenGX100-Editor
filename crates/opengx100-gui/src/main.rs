@@ -3,6 +3,7 @@
 //! Run with `--sim` to use an in-memory simulated pedal instead of USB MIDI.
 
 mod app;
+mod log;
 mod setup;
 mod store;
 mod worker;
@@ -36,6 +37,7 @@ impl eframe::App for Root {
 }
 
 fn main() -> eframe::Result {
+    log::line(&format!("OpenGX100 Editor {} started", env!("CARGO_PKG_VERSION")));
     let sim = std::env::args().any(|a| a == "--sim");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

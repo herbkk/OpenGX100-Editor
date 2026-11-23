@@ -2,13 +2,17 @@
 //! parameters, the setlists ([`setlists`]) or the backups ([`backups`]).
 
 mod assigns;
+mod auto_write;
 mod backups;
 mod chain_edit;
+mod controls;
 mod editing;
+mod eq_graph;
+mod presets;
 mod setlists;
 mod tuner;
 
-use crate::store::{Backup, BackupInfo, Setlist, Store};
+use crate::store::{Backup, BackupInfo, Setlist, Settings, Store};
 use crate::worker::{self, Cmd, Event, PatchId};
 use editing::Dialog;
 use eframe::egui::{self, pos2, vec2, Color32, Pos2, Rect, RichText, Sense, Stroke};
@@ -95,13 +99,25 @@ enum Conn {
     Connecting,
     Connected(String),
     Failed(String),
+    /// The pedal's MIDI ports went away (unplugged, switched off); reconnects once they're back.
+    Lost,
 }
+
+/// How often to look whether the pedal's MIDI ports are still (or again) there.
+const PORT_CHECK: Duration = Duration::from_secs(1);
 
 pub struct EditorApp {
     tx: Sender<Cmd>,
     rx: Receiver<Event>,
     worker: Option<JoinHandle<()>>,
     conn: Conn,
+    /// Sees the MIDI ports come and go (`None` if CoreMIDI refused a client).
+    port_watch: Option<opengx100_midi::PortWatch>,
+    /// The (input, output) ports of the pedal we're (or were last) connected to; `None` for the simulator.
+    ports: Option<(String, String)>,
+    last_port_check: Instant,
+    /// The current connection attempt was started by the port watch: if it fails, keep waiting.
+    auto_reconnect: bool,
     /// The pedal pushes changes (editor mode is on).
     live: bool,
     current: Option<u16>,
@@ -134,6 +150,12 @@ pub struct EditorApp {
     selected_assign: u8,
     /// Where setlists and backups live; `None` if the data folder can't be used.
     store: Option<Store>,
+    /// The app's preferences (auto-write), saved with the store.
+    settings: Settings,
+    /// When the current auto-write period started (`None` while auto-write is off).
+    auto_write_from: Option<Instant>,
+    /// The patch an auto-write is on its way to, to say so when it's done.
+    auto_writing: Option<u16>,
     setlists: Vec<Setlist>,
     /// Index in `setlists` of the one being edited.
     active: Option<usize>,
@@ -148,6 +170,8 @@ pub struct EditorApp {
     open_backup: Option<(PathBuf, Backup)>,
     confirm_delete_backup: Option<PathBuf>,
     dialog: Option<Dialog>,
+    /// The FX presets menu's list, read from disk when it opens.
+    preset_cache: presets::PresetCache,
     /// (done, total) while a setlist is being written.
     setlist_write: Option<(usize, usize)>,
     /// The current patch and its new data, when a setlist write rewrites it.
@@ -169,6 +193,10 @@ impl EditorApp {
             rx: ev_rx,
             worker: Some(worker),
             conn: Conn::Connecting,
+            port_watch: opengx100_midi::PortWatch::new().ok(),
+            ports: None,
+            last_port_check: Instant::now(),
+            auto_reconnect: false,
             live: false,
             current: None,
             names: vec![None; USER_PATCHES as usize],
@@ -190,6 +218,9 @@ impl EditorApp {
             ctl_exp_page: CtlExpPage::Functions,
             selected_assign: 1,
             store: None,
+            settings: Settings::default(),
+            auto_write_from: None,
+            auto_writing: None,
             setlists: Vec::new(),
             active: None,
             unsaved_since: None,
@@ -200,6 +231,7 @@ impl EditorApp {
             open_backup: None,
             confirm_delete_backup: None,
             dialog: None,
+            preset_cache: Default::default(),
             setlist_write: None,
             setlist_rewrites_current: None,
         };
@@ -219,6 +251,7 @@ impl EditorApp {
                 self.setlists = lists;
                 self.active = (!self.setlists.is_empty()).then_some(0);
                 self.backups = store.list_backups();
+                self.settings = store.load_settings();
                 self.store = Some(store);
             }
             Err(e) => {
@@ -228,7 +261,15 @@ impl EditorApp {
     }
 
     fn connect(&mut self, sim: bool) {
+        self.forget_pedal();
         self.conn = Conn::Connecting;
+        self.auto_reconnect = false;
+        self.last_error = None;
+        let _ = self.tx.send(Cmd::Connect { sim });
+    }
+
+    /// Drops everything read from the pedal and whatever was on its way to it.
+    fn forget_pedal(&mut self) {
         self.live = false;
         self.current = None;
         self.names.iter_mut().for_each(|n| *n = None);
@@ -243,8 +284,35 @@ impl EditorApp {
         self.tuner = Default::default();
         self.dialog = None;
         self.setlist_write = None;
-        self.last_error = None;
-        let _ = self.tx.send(Cmd::Connect { sim });
+    }
+
+    /// Notices the pedal going away (USB unplugged, switched off) and coming back. Without this the app
+    /// would keep talking to ports that are gone, and a pedal switched on again would be out of editor mode.
+    fn watch_ports(&mut self, ctx: &egui::Context) {
+        let Some((input, output)) = self.ports.clone() else { return };
+        if !matches!(self.conn, Conn::Connected(_) | Conn::Lost) {
+            return;
+        }
+        ctx.request_repaint_after(PORT_CHECK);
+        if self.last_port_check.elapsed() < PORT_CHECK {
+            return;
+        }
+        self.last_port_check = Instant::now();
+        let Some(watch) = &self.port_watch else { return };
+        let present = watch.present(&input, &output);
+        match self.conn {
+            Conn::Connected(_) if !present => {
+                let _ = self.tx.send(Cmd::Disconnected);
+                self.forget_pedal();
+                self.conn = Conn::Lost;
+                self.last_error = None;
+            }
+            Conn::Lost if present => {
+                self.connect(false);
+                self.auto_reconnect = true;
+            }
+            _ => {}
+        }
     }
 
     /// Reads a patch unless it's cached or on its way. Stored patches don't change behind our back;
@@ -271,8 +339,11 @@ impl EditorApp {
     fn handle_events(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Event::Connected { desc, current, live } => {
+                Event::Connected { desc, current, live, ports } => {
                     self.conn = Conn::Connected(desc);
+                    self.ports = ports;
+                    self.auto_reconnect = false;
+                    self.last_port_check = Instant::now();
                     self.current = current;
                     self.live = live;
                     self.backup_progress = None;
@@ -327,7 +398,11 @@ impl EditorApp {
                 Event::System(areas) => self.system = areas,
                 Event::SystemChanged { addr, data } => self.apply_system(addr, &data),
                 Event::Saved(n) => {
-                    if self.current == Some(n) || self.view == View::Patch {
+                    self.auto_write_restart();
+                    if self.auto_writing.take() == Some(n) {
+                        let at = chrono::Local::now().format("%H:%M");
+                        self.notice = Some(format!("Patch {n:03} auto-written at {at}."));
+                    } else if self.current == Some(n) || self.view == View::Patch {
                         self.notice = Some(format!("Patch {n:03} written."));
                     }
                 }
@@ -344,9 +419,15 @@ impl EditorApp {
                 Event::SetlistDone { written, total } => self.setlist_write_finished(written, total),
                 Event::Error(e) => {
                     self.loading.clear();
-                    if matches!(self.conn, Conn::Connecting) {
+                    self.auto_writing = None;
+                    if matches!(self.conn, Conn::Connecting) && self.auto_reconnect {
+                        // The ports are back but the pedal isn't answering yet (still starting up): try again.
+                        self.conn = Conn::Lost;
+                        self.last_port_check = Instant::now();
+                    } else if matches!(self.conn, Conn::Connecting) {
                         self.conn = Conn::Failed(e);
-                    } else {
+                    } else if !matches!(self.conn, Conn::Lost) {
+                        // (Once the pedal is gone, the timeouts of what was still on its way say nothing new.)
                         self.last_error = Some(e);
                     }
                 }
@@ -397,6 +478,11 @@ impl EditorApp {
                 Conn::Failed(e) => {
                     ui.colored_label(RED, "●");
                     ui.label(e).on_hover_text(e);
+                }
+                Conn::Lost => {
+                    ui.colored_label(RED, "●");
+                    ui.label("GX-100 disconnected, waiting for it…")
+                        .on_hover_text("Plug it in or switch it on: the editor reconnects by itself");
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -527,6 +613,7 @@ impl EditorApp {
                 {
                     self.open_save_dialog();
                 }
+                ui.add_enabled_ui(connected, |ui| self.auto_write_controls(ui));
                 if ui
                     .add_enabled(connected && unsaved == Some(true), egui::Button::new("Revert"))
                     .on_hover_text("Drop the changes: reload the stored patch")
@@ -844,15 +931,11 @@ impl EditorApp {
         let doc = tables::fx_doc(t.name);
         ui.horizontal(|ui| {
             ui.heading(t.name);
-            let (txt, col) = if s.on { ("ON", GREEN) } else { ("OFF", Color32::from_gray(140)) };
-            if ui
-                .add(egui::Button::new(RichText::new(txt).color(col).strong()))
-                .on_hover_text("Turn the effect on/off")
-                .clicked()
-            {
-                self.set_fx_switch(slot, !s.on);
+            if let Some(on) = controls::switch(ui, s.on) {
+                self.set_fx_switch(slot, on);
             }
             ui.label(RichText::new(format!("slot {slot}")).weak());
+            self.presets_menu(ui, data, slot, t);
             self.chain_buttons(ui, data, slot);
         });
         // What the effect does (and what it models), from the parameter guide.
@@ -860,39 +943,159 @@ impl EditorApp {
             ui.add(egui::Label::new(RichText::new(d.text).weak()).wrap());
         }
         ui.add_space(4.0);
-        let base = slot_offset(slot);
-        egui::Grid::new(("fx-params", slot)).num_columns(2).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
-            for p in t.params.iter().filter(|p| matches!(p.field, FxField::Param(_))) {
-                let flash = base.is_some_and(|b| self.flashing(b + p.offset.linear(), p.encoding.size()));
-                let pdoc = doc.and_then(|d| d.param(p.unique_name));
-                let color = if flash { AMBER } else { ui.visuals().text_color() };
-                editing::doc_label(ui, RichText::new(p.name).color(color), pdoc);
-                match data.fx_param(slot, p) {
-                    Some(v) => {
-                        ui.vertical(|ui| {
-                            if let Some(n) = editing::fx_param_widget(ui, slot, p, v, pdoc) {
-                                self.set_fx_param(slot, p, n);
-                            }
-                            if !p.values.is_empty() {
-                                editing::option_note(ui, pdoc, &p.display(v));
-                            }
-                        });
-                    }
-                    None => {
-                        ui.label("—");
-                    }
+        // PARAMETRIC EQUALIZER: its frequency response, with draggable bands.
+        let eq = eq_graph::Eq::read(s.on, |k| t.param(k.fx_name()).and_then(|p| data.fx_param(slot, p)));
+        if let Some(eq) = eq {
+            for (k, v) in eq_graph::graph(ui, ("fx-eq", slot), &eq) {
+                if let Some(p) = t.param(k.fx_name()) {
+                    self.set_fx_param(slot, p, v);
                 }
-                ui.end_row();
             }
+            ui.add_space(6.0);
+        }
+        let params: Vec<&'static FxParamDef> =
+            t.params.iter().filter(|p| matches!(p.field, FxField::Param(_))).collect();
+        if t.name == "PARAMETRIC EQUALIZER" && self.peq_controls(ui, data, slot, t) {
+            return;
+        }
+        // Numbered sets (a dual CHORUS's "1: RATE", "2: RATE") get a row of their own.
+        let mut groups: Vec<(Option<&str>, Vec<&'static FxParamDef>)> = Vec::new();
+        for p in params {
+            let g = controls::short_name(p.name).0;
+            match groups.iter_mut().find(|(k, _)| *k == g) {
+                Some((_, ps)) => ps.push(p),
+                None => groups.push((g, vec![p])),
+            }
+        }
+        for (g, ps) in groups {
+            if let Some(g) = g {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(g).strong());
+                    ui.add(egui::Separator::default().horizontal());
+                });
+            }
+            let kind = |p: &FxParamDef| controls::control_for(t, p);
+            // Knobs side by side, then the faders, then switches and lists.
+            for row in [controls::Control::Knob, controls::Control::Fader] {
+                if ps.iter().any(|p| kind(p) == row) {
+                    controls::row(ui, |ui| {
+                        for p in ps.iter().filter(|p| kind(p) == row) {
+                            self.fx_scale(ui, data, slot, t, p, controls::short_name(p.name).1, row);
+                        }
+                    });
+                    ui.add_space(8.0);
+                }
+            }
+            let rest: Vec<_> =
+                ps.iter().filter(|p| !matches!(kind(p), controls::Control::Knob | controls::Control::Fader)).collect();
+            if rest.is_empty() {
+                continue;
+            }
+            egui::Grid::new(("fx-params", slot, g)).num_columns(2).striped(true).spacing([16.0, 8.0]).show(ui, |ui| {
+                for p in rest {
+                    let pdoc = doc.and_then(|d| d.param(p.unique_name));
+                    let color = if self.fx_flashing(slot, p) { AMBER } else { ui.visuals().text_color() };
+                    editing::doc_label(ui, RichText::new(controls::short_name(p.name).1).color(color), pdoc);
+                    let Some(v) = data.fx_param(slot, p) else {
+                        ui.label("—");
+                        ui.end_row();
+                        continue;
+                    };
+                    ui.vertical(|ui| {
+                        let new = match kind(p) {
+                            controls::Control::Switch => ui
+                                .horizontal(|ui| controls::switch(ui, v == p.max))
+                                .inner
+                                .map(|on| if on { p.max } else { p.min }),
+                            controls::Control::Buttons => {
+                                let mut picked = None;
+                                ui.horizontal_wrapped(|ui| {
+                                    for (o, label) in editing::fx_options(p) {
+                                        let r = ui.radio(o == v, label);
+                                        let r = match pdoc.and_then(|d| d.option(label)) {
+                                            Some(t) => r.on_hover_text(t),
+                                            None => r,
+                                        };
+                                        if r.clicked() && o != v {
+                                            picked = Some(o);
+                                        }
+                                    }
+                                });
+                                picked
+                            }
+                            _ => editing::fx_param_widget(ui, slot, p, v, pdoc),
+                        };
+                        if let Some(n) = new {
+                            self.set_fx_param(slot, p, n);
+                        }
+                        if !p.labels().is_empty() {
+                            editing::option_note(ui, pdoc, &p.display(v));
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+        }
+    }
+
+    /// Whether the pedal just changed parameter `p` of the effect in `slot`.
+    fn fx_flashing(&self, slot: u8, p: &FxParamDef) -> bool {
+        slot_offset(slot).is_some_and(|b| self.flashing(b + p.offset.linear(), p.encoding.size()))
+    }
+
+    /// A knob or fader for parameter `p` of the effect in `slot`, labelled `name`; writes changes.
+    #[allow(clippy::too_many_arguments)]
+    fn fx_scale(
+        &mut self,
+        ui: &mut egui::Ui,
+        data: &PatchData,
+        slot: u8,
+        t: &FxTypeDef,
+        p: &FxParamDef,
+        name: &str,
+        kind: controls::Control,
+    ) {
+        let Some(value) = data.fx_param(slot, p) else { return };
+        let pdoc = tables::fx_doc(t.name).and_then(|d| d.param(p.unique_name));
+        let name_color = if self.fx_flashing(slot, p) { AMBER } else { ui.visuals().text_color() };
+        let display = |v: i32| p.display(v);
+        let scale = controls::Scale {
+            name,
+            name_color,
+            value,
+            min: p.min,
+            max: p.max,
+            default: controls::default_value(p.init, (p.min, p.max)),
+            display: &display,
+            hover: pdoc.map(|d| d.text).filter(|t| !t.is_empty()),
+        };
+        let new = ui.push_id(("fx", slot, p.unique_name), |ui| controls::knob_or_fader(ui, kind, &scale)).inner;
+        if let Some(n) = new {
+            self.set_fx_param(slot, p, n);
+        }
+    }
+
+    /// PARAMETRIC EQUALIZER as an EQ unit ([`controls::eq_sections`]). False if the type lacks a setting.
+    fn peq_controls(&mut self, ui: &mut egui::Ui, data: &PatchData, slot: u8, t: &FxTypeDef) -> bool {
+        if eq_graph::Setting::ALL.iter().any(|k| t.param(k.fx_name()).is_none()) {
+            return false;
+        }
+        controls::eq_sections(ui, |ui, k, label, kind| {
+            let p = t.param(k.fx_name()).expect("checked above");
+            self.fx_scale(ui, data, slot, t, p, label, kind);
         });
+        true
     }
 }
 
 impl eframe::App for EditorApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events();
+        self.watch_ports(ctx);
         self.sync_tuner();
         self.autosave(ctx);
+        self.auto_write(ctx);
         if !self.recent.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(100)); // let highlights fade
         }
@@ -924,6 +1127,15 @@ impl eframe::App for EditorApp {
                             self.connect(true);
                         }
                     });
+                });
+            }
+            Conn::Lost if !matches!(self.view, View::Setlists | View::Backups) => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(60.0);
+                    ui.heading("The GX-100 was disconnected");
+                    ui.label("Plug it in or switch it on: the editor reconnects by itself.");
+                    ui.add_space(8.0);
+                    ui.spinner();
                 });
             }
             _ => match self.view {

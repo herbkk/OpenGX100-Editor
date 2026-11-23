@@ -12,7 +12,7 @@ use opengx100_protocol::patch::{patch_blocks, patch_span, PatchData};
 use opengx100_protocol::tables;
 use opengx100_protocol::Address;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 const SETLIST_FORMAT: &str = "OpenGX100 Editor setlist";
 const BACKUP_FORMAT: &str = "OpenGX100 Editor backup";
 /// What files written before the project was renamed say; still read.
+const PRESET_FORMAT: &str = "OpenGX100 Editor FX preset";
 const OLD_SETLIST_FORMAT: &str = "gx100-editor setlist";
 const OLD_BACKUP_FORMAT: &str = "gx100-editor backup";
 
@@ -96,6 +97,24 @@ pub struct Area {
 }
 
 /// A backup file, without loading it.
+/// The settings of one effect block, saved on their own (`presets/<FX TYPE>/<name>.json`).
+/// Parameters are keyed by the FX type's `unique_name`s and hold stored values, so a preset
+/// still loads if a later BOSS TONE STUDIO adds or reorders parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preset {
+    pub fx_type: String,
+    pub name: String,
+    pub created: i64,
+    pub params: BTreeMap<String, i32>,
+}
+
+/// A preset found on disk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresetInfo {
+    pub path: PathBuf,
+    pub preset: Preset,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackupInfo {
     pub path: PathBuf,
@@ -147,6 +166,16 @@ struct PatchFile {
     number: u16,
     name: String,
     data: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PresetFile {
+    format: String,
+    version: u32,
+    fx_type: String,
+    name: String,
+    created: i64,
+    params: BTreeMap<String, i32>,
 }
 
 /// BOSS TONE STUDIO's backup file (`.alb`): `{"system": {area: ["0B", …]}, "userPatch": [{"User_patch%common": […], …}],
@@ -234,6 +263,25 @@ fn patch_from_hex(s: &str) -> io::Result<PatchData> {
     Ok(PatchData::from_bytes(bytes))
 }
 
+/// `s` as a file name: characters that file systems refuse become `_`.
+fn file_name(s: &str) -> String {
+    let n: String =
+        s.trim()
+            .chars()
+            .map(|c| {
+                if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .collect();
+    match n.trim_start_matches('.') {
+        "" => "_".into(),
+        t => t.into(),
+    }
+}
+
 fn invalid(e: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
@@ -243,6 +291,21 @@ fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, contents)?;
     fs::rename(&tmp, path)
+}
+
+/// The app's own preferences (`settings.json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// WRITE the live patch into the patch the pedal is on every `auto_write_minutes`, when it has changes.
+    pub auto_write: bool,
+    pub auto_write_minutes: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { auto_write: false, auto_write_minutes: 5 }
+    }
 }
 
 pub struct Store {
@@ -279,6 +342,81 @@ impl Store {
         rd.filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().and_then(|x| x.to_str()).is_some_and(|x| extensions.contains(&x)))
             .collect()
+    }
+
+    // -------------------------------------------------------------- settings
+
+    fn settings_path(&self) -> PathBuf {
+        self.root.join("settings.json")
+    }
+
+    /// The saved preferences; the defaults if there are none (or they can't be read).
+    pub fn load_settings(&self) -> Settings {
+        fs::read(self.settings_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+
+    pub fn save_settings(&self, s: &Settings) -> io::Result<()> {
+        write_atomic(&self.settings_path(), &serde_json::to_vec_pretty(s).map_err(invalid)?)
+    }
+
+    // -------------------------------------------------------------- FX presets
+
+    /// Where presets live: one folder per FX type.
+    pub fn presets_dir(&self) -> PathBuf {
+        self.root.join("presets")
+    }
+
+    pub fn preset_type_dir(&self, fx_type: &str) -> PathBuf {
+        self.presets_dir().join(file_name(fx_type))
+    }
+
+    /// The file a preset called `name` for `fx_type` is saved in.
+    pub fn preset_path(&self, fx_type: &str, name: &str) -> PathBuf {
+        self.preset_type_dir(fx_type).join(format!("{}.json", file_name(name)))
+    }
+
+    /// The presets for `fx_type`, by name, plus a message per file that couldn't be read.
+    /// Files for another type (e.g. copied into the wrong folder) are left out.
+    pub fn list_presets(&self, fx_type: &str) -> (Vec<PresetInfo>, Vec<String>) {
+        let mut out = Vec::new();
+        let mut errors = Vec::new();
+        for path in Self::files_with(&self.preset_type_dir(fx_type), &["json"]) {
+            match Self::read_preset(&path) {
+                Ok(p) if p.fx_type == fx_type => out.push(PresetInfo { path, preset: p }),
+                Ok(_) => {}
+                Err(e) => errors.push(format!("{}: {e}", path.display())),
+            }
+        }
+        out.sort_by_key(|p| p.preset.name.to_lowercase());
+        (out, errors)
+    }
+
+    pub fn read_preset(path: &Path) -> io::Result<Preset> {
+        let f: PresetFile = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
+        if f.format != PRESET_FORMAT {
+            return Err(invalid("not an FX preset file"));
+        }
+        Ok(Preset { fx_type: f.fx_type, name: f.name, created: f.created, params: f.params })
+    }
+
+    /// Saves (or replaces) a preset; returns its file.
+    pub fn save_preset(&self, p: &Preset) -> io::Result<PathBuf> {
+        fs::create_dir_all(self.preset_type_dir(&p.fx_type))?;
+        let path = self.preset_path(&p.fx_type, &p.name);
+        let f = PresetFile {
+            format: PRESET_FORMAT.into(),
+            version: 1,
+            fx_type: p.fx_type.clone(),
+            name: p.name.clone(),
+            created: p.created,
+            params: p.params.clone(),
+        };
+        write_atomic(&path, &serde_json::to_vec_pretty(&f).map_err(invalid)?)?;
+        Ok(path)
+    }
+
+    pub fn delete_preset(path: &Path) -> io::Result<()> {
+        fs::remove_file(path)
     }
 
     // -------------------------------------------------------------- setlists
@@ -463,6 +601,51 @@ mod tests {
 
     fn patch(fill: u8) -> PatchData {
         PatchData::from_bytes(vec![fill; patch_span() as usize])
+    }
+
+    #[test]
+    fn presets_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().to_path_buf()).unwrap();
+        assert!(store.list_presets("T.WAH").0.is_empty());
+        let mut p = Preset {
+            fx_type: "T.WAH".into(),
+            name: "Funk / slow".into(),
+            created: 1,
+            params: BTreeMap::from([("sens".into(), 50), ("peak".into(), -3)]),
+        };
+        let path = store.save_preset(&p).unwrap();
+        assert_eq!(path, dir.path().join("presets/T.WAH/Funk _ slow.json"));
+        p.params.insert("sens".into(), 60);
+        assert_eq!(store.save_preset(&p).unwrap(), path); // same name replaces
+        store.save_preset(&Preset { name: "Another".into(), ..p.clone() }).unwrap();
+        // a file of another type in this folder, and one that isn't a preset
+        fs::write(path.with_file_name("x.json"), "{}").unwrap();
+        let mut other = p.clone();
+        other.fx_type = "PHASER".into();
+        let o = store.save_preset(&other).unwrap();
+        fs::copy(&o, path.with_file_name("phaser.json")).unwrap();
+        let (list, errors) = store.list_presets("T.WAH");
+        assert_eq!(list.iter().map(|i| i.preset.name.as_str()).collect::<Vec<_>>(), ["Another", "Funk / slow"]);
+        assert_eq!(list[1].preset, p);
+        assert_eq!(errors.len(), 1);
+        Store::delete_preset(&path).unwrap();
+        assert_eq!(store.list_presets("T.WAH").0.len(), 1);
+        assert_eq!(file_name("..hidden"), "hidden");
+        assert_eq!(file_name(" "), "_");
+    }
+
+    #[test]
+    fn settings_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().to_path_buf()).unwrap();
+        assert_eq!(store.load_settings(), Settings::default());
+        let s = Settings { auto_write: true, auto_write_minutes: 12 };
+        store.save_settings(&s).unwrap();
+        assert_eq!(store.load_settings(), s);
+        // missing fields take their defaults
+        fs::write(dir.path().join("settings.json"), "{\"auto_write\": true}").unwrap();
+        assert_eq!(store.load_settings(), Settings { auto_write: true, auto_write_minutes: 5 });
     }
 
     #[test]

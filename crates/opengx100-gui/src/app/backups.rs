@@ -176,7 +176,7 @@ impl EditorApp {
 }
 
 /// Opens a folder in Finder, or (`select`) shows a file in it.
-fn reveal(path: &Path, select: bool) {
+pub(super) fn reveal(path: &Path, select: bool) {
     let mut cmd = std::process::Command::new("open");
     if select {
         cmd.arg("-R");

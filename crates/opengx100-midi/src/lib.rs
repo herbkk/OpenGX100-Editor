@@ -48,6 +48,28 @@ fn not_found(kind: &str, filter: Option<&str>, names: &[String]) -> String {
     )
 }
 
+/// Watches whether MIDI ports are present, without connecting to them. Keep one for the program's
+/// life and create it on the main thread: on macOS, CoreMIDI updates a client's port list through the
+/// run loop of the thread that created it.
+pub struct PortWatch {
+    input: MidiInput,
+    output: MidiOutput,
+}
+
+impl PortWatch {
+    pub fn new() -> Result<Self, String> {
+        let input = MidiInput::new(&format!("{CLIENT}-watch")).map_err(|e| e.to_string())?;
+        let output = MidiOutput::new(&format!("{CLIENT}-watch")).map_err(|e| e.to_string())?;
+        Ok(PortWatch { input, output })
+    }
+
+    /// Whether an input port named `in_name` and an output port named `out_name` both exist.
+    pub fn present(&self, in_name: &str, out_name: &str) -> bool {
+        let has_in = self.input.ports().iter().any(|p| self.input.port_name(p).is_ok_and(|n| n == in_name));
+        has_in && self.output.ports().iter().any(|p| self.output.port_name(p).is_ok_and(|n| n == out_name))
+    }
+}
+
 pub fn open(filter: Option<&str>) -> Result<MidiTransport, String> {
     open_with_waker(filter, || {})
 }

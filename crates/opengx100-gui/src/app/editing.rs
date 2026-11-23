@@ -17,15 +17,36 @@ use opengx100_protocol::tables::{self, FxParamDef, ParamDef, ParamDoc};
 /// A dialog that needs an answer before something is written.
 pub(super) enum Dialog {
     /// WRITE: store the live patch.
-    Save { target: u16, name: String },
+    Save {
+        target: u16,
+        name: String,
+    },
     /// Switching patches would drop unsaved changes.
-    ConfirmSwitch { to: u16 },
+    ConfirmSwitch {
+        to: u16,
+    },
     /// Store the current input settings into the selected input-setting slot.
-    SaveInputSetting { name: String },
+    SaveInputSetting {
+        name: String,
+    },
     /// Write the active setlist into the pedal.
     ConfirmSetlistWrite,
     /// Remove or replace an effect (the pedal's DELETE / OVERWRITE WARNING is on). `ok`: the button.
-    ConfirmChainEdit { edit: Edit, text: String, ok: &'static str },
+    ConfirmChainEdit {
+        edit: Edit,
+        text: String,
+        ok: &'static str,
+    },
+    /// Save the settings of the effect in `slot` as a preset (see `presets.rs`).
+    SavePreset {
+        slot: u8,
+        fx_type: &'static str,
+        name: String,
+    },
+    DeletePreset {
+        path: std::path::PathBuf,
+        name: String,
+    },
 }
 
 /// One row of the CTL/EXP menu: the label and the parameter-name stem (`Num1` → `Num1Function`…).
@@ -195,8 +216,8 @@ pub(super) fn value_widget(
 }
 
 pub(super) fn fx_options(p: &FxParamDef) -> Vec<(i32, &'static str)> {
-    let spans = p.values.len() as i64 == p.max as i64 - p.min as i64 + 1;
-    p.values.iter().enumerate().map(|(i, l)| (if spans { p.min + i as i32 } else { i as i32 }, *l)).collect()
+    let spans = p.labels().len() as i64 == p.max as i64 - p.min as i64 + 1;
+    p.labels().iter().enumerate().map(|(i, l)| (if spans { p.min + i as i32 } else { i as i32 }, *l)).collect()
 }
 
 pub(super) fn param_options(p: &ParamDef) -> Vec<(i32, &'static str)> {
@@ -441,6 +462,26 @@ impl EditorApp {
     // ------------------------------------------------------------------ menus
 
     /// A labelled row for a system parameter.
+    /// A knob or fader for system setting `p`, labelled `label`; writes changes.
+    fn sys_scale(&mut self, ui: &mut egui::Ui, p: &ParamDef, label: &str, kind: super::controls::Control) {
+        let Some(value) = self.sys_value(p.path) else { return };
+        let display = |v: i32| p.display(v);
+        let scale = super::controls::Scale {
+            name: label,
+            name_color: ui.visuals().text_color(),
+            value,
+            min: p.min,
+            max: p.max,
+            default: super::controls::default_value(p.init, (p.min, p.max)),
+            display: &display,
+            hover: tables::param_doc(p.path).map(|d| d.text).filter(|t| !t.is_empty()),
+        };
+        let new = ui.push_id(("sys", p.path), |ui| super::controls::knob_or_fader(ui, kind, &scale)).inner;
+        if let Some(n) = new {
+            self.set_sys_param(p, n);
+        }
+    }
+
     fn sys_row(&mut self, ui: &mut egui::Ui, path: &str) {
         let Some(p) = tables::param(path) else { return };
         doc_label(ui, p.desc, tables::param_doc(path));
@@ -584,12 +625,39 @@ impl EditorApp {
                 }
             });
             ui.add_space(10.0);
-            ui.label(RichText::new("Global EQ").strong());
-            egui::Grid::new("global-eq").num_columns(2).striped(true).spacing([24.0, 6.0]).show(ui, |ui| {
-                for path in GLOBAL_EQ {
-                    self.sys_row(ui, path);
+            let on = self.sys_value("System_control.GlobalEqSw") == Some(1);
+            ui.horizontal(|ui| {
+                let sw = tables::param("System_control.GlobalEqSw");
+                let label = ui.label(RichText::new("Global EQ").strong());
+                if let Some(d) = sw.and_then(|p| tables::param_doc(p.path)).filter(|d| !d.text.is_empty()) {
+                    label.on_hover_text(d.text);
+                }
+                if let (Some(p), Some(new)) = (sw, super::controls::switch(ui, on)) {
+                    self.set_sys_param(p, new as i32);
                 }
             });
+            if let Some(eq) = super::eq_graph::Eq::read(on, |k| self.sys_value(k.global_path())) {
+                for (k, v) in super::eq_graph::graph(ui, "global-eq-graph", &eq) {
+                    if let Some(p) = tables::param(k.global_path()) {
+                        self.set_sys_param(p, v);
+                    }
+                }
+                ui.add_space(6.0);
+            }
+            let all = super::eq_graph::Setting::ALL;
+            if all.iter().all(|k| tables::param(k.global_path()).is_some()) {
+                super::controls::eq_sections(ui, |ui, k, label, kind| {
+                    let p = tables::param(k.global_path()).expect("checked above");
+                    self.sys_scale(ui, p, label, kind);
+                });
+            } else {
+                // Tables without some of these: plain rows, as for the other settings.
+                egui::Grid::new("global-eq").num_columns(2).striped(true).spacing([24.0, 6.0]).show(ui, |ui| {
+                    for path in GLOBAL_EQ {
+                        self.sys_row(ui, path);
+                    }
+                });
+            }
         });
     }
 
@@ -715,6 +783,12 @@ impl EditorApp {
                             keep = false;
                         }
                     });
+                });
+            }
+            Dialog::SavePreset { .. } | Dialog::DeletePreset { .. } => {
+                let title = if matches!(dialog, Dialog::SavePreset { .. }) { "Save preset" } else { "Delete preset" };
+                window(title).show(ctx, |ui| {
+                    keep = self.preset_dialog(ui, &mut dialog);
                 });
             }
         }

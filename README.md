@@ -17,6 +17,15 @@ doing.
   expression pedal (values the pedal changes flash amber). Every patch setting, FX on/off and FX parameter is editable
   and written immediately. The signal chain is drawn with its parallel branch (DIVIDER → A/B → MIXER), each effect in
   the colour BOSS TONE STUDIO gives it (filled when on, outlined when off).
+- **Effects that look like gear**: knobs (value shown below) for amounts and times, faders for levels and graphic EQ
+  bands, toggle switches, radio buttons for short lists. Drag, or rest the pointer on a control and roll the mouse
+  wheel (Shift: fine); double-click resets. PARAMETRIC EQ and the Global EQ get a frequency-response graph with
+  draggable bands and EQ-style sections.
+- **FX presets**: save the settings of any effect block to a file and load them into another patch's block of the same
+  type (Presets ▾ next to the effect's name).
+- **Auto-write**: optionally WRITE the live patch every few minutes when it has changes.
+- **Reconnects by itself** when the pedal is unplugged or switched off and comes back; a log file
+  (`logs/editor.log` in the data folder) records what the pedal sent, for bug reports.
 - **Chain editing**, as in BOSS TONE STUDIO: drag an effect to move it, click between two blocks to add one, replace
   or remove the selected effect. A DIVIDER brings its SPLITTER and MIXER, and dragging it moves the whole parallel
   section. Types that don't fit are greyed out: the editor's limits (15 effects, 9 of a type, 2 preamps, one

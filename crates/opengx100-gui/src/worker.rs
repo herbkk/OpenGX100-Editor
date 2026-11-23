@@ -98,6 +98,9 @@ pub enum Cmd {
     CancelSetlistWrite,
     /// Leave editor mode and stop.
     Shutdown,
+    /// The pedal's MIDI ports are gone (unplugged or switched off): drop the connection without
+    /// sending anything, and stop the background jobs.
+    Disconnected,
     /// Sent by the MIDI input thread: the pedal sent something.
     MidiArrived,
 }
@@ -109,6 +112,8 @@ pub enum Event {
         current: Option<u16>,
         /// Whether the pedal will push changes (editor mode is on).
         live: bool,
+        /// The MIDI (input, output) port names, to notice the pedal going away; `None` for the simulator.
+        ports: Option<(String, String)>,
     },
     Name(u16, String),
     Patch(PatchId, PatchData),
@@ -244,6 +249,9 @@ pub fn run(rx: Receiver<Cmd>, wake: Sender<Cmd>, tx: Sender<Event>, notify: impl
     // handled (the tuner and the expression pedal send many a second, which would starve the background jobs).
     let woken = Arc::new(AtomicBool::new(false));
     let send = |e: Event| {
+        if let Event::Error(msg) = &e {
+            log(&format!("error: {msg}"));
+        }
         let _ = tx.send(e);
         notify();
     };
@@ -260,6 +268,7 @@ pub fn run(rx: Receiver<Cmd>, wake: Sender<Cmd>, tx: Sender<Event>, notify: impl
         };
         match cmd {
             Some(Cmd::Connect { sim }) => {
+                log(if sim { "connect (simulator)" } else { "connect" });
                 if let Some(mut d) = dev.take() {
                     let _ = d.set_editor_mode(false);
                 }
@@ -271,11 +280,12 @@ pub fn run(rx: Receiver<Cmd>, wake: Sender<Cmd>, tx: Sender<Event>, notify: impl
                     send(Event::SetlistDone { written: job.written, total: job.total });
                 }
                 match connect(sim, wake.clone(), woken.clone()) {
-                    Ok((mut d, desc)) => {
+                    Ok((mut d, desc, ports)) => {
                         let current = current_patch(&mut d);
                         // The simulator never pushes anything; a real pedal does once in editor mode.
                         let live = !sim && enter_editor_mode(&mut d, &send);
-                        send(Event::Connected { desc, current, live });
+                        log(&format!("connected: {desc}, patch {current:?}, live updates {live}"));
+                        send(Event::Connected { desc, current, live, ports });
                         match d.read_system_areas() {
                             Ok(areas) => send(Event::System(areas)),
                             Err(e) => send(Event::Error(format!("reading system settings: {e}"))),
@@ -315,6 +325,7 @@ pub fn run(rx: Receiver<Cmd>, wake: Sender<Cmd>, tx: Sender<Event>, notify: impl
                 }
             }
             Some(Cmd::WriteBytes { addr, data }) => {
+                log(&format!("write: {addr} {}", crate::log::hex(&data)));
                 let Some(d) = dev.as_mut() else { continue };
                 if !writable(addr, data.len()) {
                     send(Event::Error(format!("refused to write {} bytes at {addr}", data.len())));
@@ -337,6 +348,7 @@ pub fn run(rx: Receiver<Cmd>, wake: Sender<Cmd>, tx: Sender<Event>, notify: impl
                 }
             }
             Some(Cmd::SelectPatch(n)) => {
+                log(&format!("select patch {n}"));
                 let Some(d) = dev.as_mut() else { continue };
                 match d.select_patch(n).and_then(|()| d.read_patch(patch::temp_patch())) {
                     Ok(p) => {
@@ -347,6 +359,7 @@ pub fn run(rx: Receiver<Cmd>, wake: Sender<Cmd>, tx: Sender<Event>, notify: impl
                 }
             }
             Some(Cmd::SavePatch { target, name }) => {
+                log(&format!("WRITE live patch to {target} as {name:?}"));
                 let Some(d) = dev.as_mut() else { continue };
                 let Some(addr) = patch::user_patch(target) else { continue };
                 let result = d.save_temp_patch(target, &name).and_then(|()| {
@@ -424,7 +437,21 @@ pub fn run(rx: Receiver<Cmd>, wake: Sender<Cmd>, tx: Sender<Event>, notify: impl
                     drain_notifications(d, &send);
                 }
             }
-            Some(Cmd::Shutdown) => break,
+            Some(Cmd::Disconnected) => {
+                log("the pedal's MIDI ports are gone");
+                dev = None;
+                names.clear();
+                if backup.take().is_some() {
+                    send(Event::BackupCancelled);
+                }
+                if let Some(job) = setlist.take() {
+                    send(Event::SetlistDone { written: job.written, total: job.total });
+                }
+            }
+            Some(Cmd::Shutdown) => {
+                log("quit");
+                break;
+            }
             // `recv` failed: the UI is gone.
             None if names.is_empty() && backup.is_none() && setlist.is_none() => break,
             // A setlist write goes before everything else in the background.
@@ -480,9 +507,11 @@ pub fn run(rx: Receiver<Cmd>, wake: Sender<Cmd>, tx: Sender<Event>, notify: impl
     }
 }
 
-fn connect(sim: bool, wake: Sender<Cmd>, woken: Arc<AtomicBool>) -> Result<(Dev, String), String> {
-    let (transport, desc): (Box<dyn Transport>, String) = if sim {
-        (Box::new(demo_sim()), "simulated GX-100".into())
+type Ports = Option<(String, String)>;
+
+fn connect(sim: bool, wake: Sender<Cmd>, woken: Arc<AtomicBool>) -> Result<(Dev, String, Ports), String> {
+    let (transport, desc, ports): (Box<dyn Transport>, String, Ports) = if sim {
+        (Box::new(demo_sim()), "simulated GX-100".into(), None)
     } else {
         let t = opengx100_midi::open_with_waker(None, move || {
             if !woken.swap(true, Ordering::SeqCst) {
@@ -490,14 +519,15 @@ fn connect(sim: bool, wake: Sender<Cmd>, woken: Arc<AtomicBool>) -> Result<(Dev,
             }
         })?;
         let desc = format!("GX-100 on {}", t.in_name);
-        (Box::new(t), desc)
+        let ports = Some((t.in_name.clone(), t.out_name.clone()));
+        (Box::new(t), desc, ports)
     };
     let mut dev = Device::new(transport);
     if sim {
         dev = dev.without_pacing().with_timeout(Duration::from_millis(100));
     }
     dev.identify().map_err(|e| e.to_string())?;
-    Ok((dev, desc))
+    Ok((dev, desc, ports))
 }
 
 /// The official editor's handshake: check the protocol level, then switch editor mode on.
@@ -527,6 +557,7 @@ fn drain_notifications(d: &mut Dev, send: &impl Fn(Event)) {
     let mut patch_changed = false;
     let mut stored_on_pedal = Vec::new();
     while let Ok(Some(n)) = d.next_notification(Duration::ZERO) {
+        log(&format!("pedal: {} {}", n.addr, crate::log::hex(&n.data)));
         // WRITE pressed on the pedal: that user patch changed.
         if Some(n.addr) == tables::command("PATCH_WRITE") && n.data.len() >= 2 {
             stored_on_pedal.push((n.data[0] as u16) << 7 | n.data[1] as u16);
@@ -585,15 +616,33 @@ fn edit_chain(d: &mut Dev, data: &PatchData, edit: &Edit, send: &impl Fn(Event))
     result.ok().flatten()
 }
 
-/// The pedal needs a moment after a patch change. Like the official editor, wait until it says it
-/// accepts reads again (`IS_RQ1_ACCEPT`, retried every 250 ms for up to 10 s), then read.
+/// The pedal needs a moment after a patch change (and after a WRITE). Like the official editor, wait
+/// until it says it accepts reads again (`IS_RQ1_ACCEPT`, retried every 250 ms for up to 10 s), then
+/// read. A read can still go unanswered while the pedal is busy, so try a few times: giving up would
+/// leave the app showing the previous patch, with the pedal's later changes applied to the wrong data.
 fn reread_temp(d: &mut Dev, send: &impl Fn(Event)) {
-    std::thread::sleep(Duration::from_millis(500));
-    let _ = d.wait_until_ready();
-    match d.read_patch(patch::temp_patch()) {
-        Ok(p) => send(Event::Patch(PatchId::Temp, p)),
-        Err(e) => send(Event::Error(format!("re-reading the live patch: {e}"))),
+    const TRIES: usize = 3;
+    for attempt in 1..=TRIES {
+        std::thread::sleep(Duration::from_millis(500));
+        if let Err(e) = d.wait_until_ready() {
+            log(&format!("re-read {attempt}/{TRIES}: pedal not ready: {e}"));
+        }
+        match d.read_patch(patch::temp_patch()) {
+            Ok(p) => {
+                if attempt > 1 {
+                    log(&format!("re-read {attempt}/{TRIES}: ok"));
+                }
+                send(Event::Patch(PatchId::Temp, p));
+                return;
+            }
+            Err(e) if attempt < TRIES => log(&format!("re-read {attempt}/{TRIES} failed: {e}")),
+            Err(e) => send(Event::Error(format!("re-reading the live patch (tried {TRIES} times): {e}"))),
+        }
     }
+}
+
+fn log(msg: &str) {
+    crate::log::line(msg);
 }
 
 fn current_patch_from(n: &Notification) -> Option<u16> {
@@ -790,6 +839,24 @@ mod tests {
         assert_eq!(edit_chain(&mut d, after, &gone, &|e| events.borrow_mut().push(e)), None);
         assert!(matches!(events.borrow().first(), Some(Event::Error(_))));
         assert_eq!(d.read_patch(patch::temp_patch()).unwrap().chain(), after.chain());
+    }
+
+    #[test]
+    fn disconnected_drops_the_pedal() {
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+        let wake = cmd_tx.clone();
+        let worker = std::thread::spawn(move || run(cmd_rx, wake, ev_tx, || {}));
+        cmd_tx.send(Cmd::Connect { sim: true }).unwrap();
+        cmd_tx.send(Cmd::Backup).unwrap();
+        cmd_tx.send(Cmd::Disconnected).unwrap();
+        cmd_tx.send(Cmd::LoadPatch(PatchId::Temp)).unwrap();
+        cmd_tx.send(Cmd::Shutdown).unwrap();
+        worker.join().unwrap();
+        let events: Vec<Event> = ev_rx.try_iter().collect();
+        assert!(matches!(events[0], Event::Connected { ports: None, .. }), "the simulator has no ports to watch");
+        assert!(events.iter().any(|e| matches!(e, Event::BackupCancelled)), "the backup stops");
+        assert!(matches!(events.last(), Some(Event::Error(e)) if e == "not connected"));
     }
 
     #[test]

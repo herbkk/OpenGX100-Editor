@@ -140,29 +140,64 @@ impl FxParamDef {
         ValueSpec { encoding: self.encoding, min: self.min, max: self.max, ofs: self.ofs }
     }
 
-    /// Human-readable value: its label when the parameter is a list.
+    /// The unit the official editor shows after the number, when that's all its label list holds
+    /// (`["[dB]"]` → `dB`, e.g. the GRAPHIC EQUALIZER bands).
+    pub fn unit(&self) -> Option<&'static str> {
+        match self.values {
+            [u] if u.len() > 2 && u.starts_with('[') && u.ends_with(']') => Some(&u[1..u.len() - 1]),
+            _ => None,
+        }
+    }
+
+    /// The value labels, when the parameter is a list (empty when it's a number, with or without a unit).
+    pub fn labels(&self) -> &'static [&'static str] {
+        if self.unit().is_some() {
+            &[]
+        } else {
+            self.values
+        }
+    }
+
+    /// Whether label i belongs to stored value `min + i` (else to value i).
+    fn labels_span_range(&self) -> bool {
+        self.labels().len() as i64 == (self.max as i64 - self.min as i64 + 1)
+    }
+
+    /// Human-readable value: its label when the parameter is a list, else the number (with its unit).
     pub fn display(&self, value: i32) -> String {
-        if !self.values.is_empty() {
-            let spans_range = self.values.len() as i64 == (self.max as i64 - self.min as i64 + 1);
-            let idx = if spans_range { value - self.min } else { value };
-            if let Some(label) = usize::try_from(idx).ok().and_then(|i| self.values.get(i)) {
+        let labels = self.labels();
+        if !labels.is_empty() {
+            let idx = if self.labels_span_range() { value - self.min } else { value };
+            if let Some(label) = usize::try_from(idx).ok().and_then(|i| labels.get(i)) {
                 return (*label).to_string();
             }
         }
-        if self.factor > 1 {
+        let number = if self.factor > 1 {
             let v = value as f64 / self.factor as f64;
-            return if v.fract() == 0.0 { format!("{v:.0}") } else { format!("{v}") };
+            if v.fract() == 0.0 {
+                format!("{v:.0}")
+            } else {
+                format!("{v}")
+            }
+        } else {
+            value.to_string()
+        };
+        match self.unit() {
+            // A range around 0 (dB) shows its sign.
+            Some(u) if self.min < 0 && value > 0 => format!("+{number}{u}"),
+            Some(u) => format!("{number}{u}"),
+            None => number,
         }
-        value.to_string()
     }
 
     /// Parses a value typed by a user: a label (case-insensitive) or a number.
     pub fn parse_value(&self, s: &str) -> Option<i32> {
-        if let Some(i) = self.values.iter().position(|v| v.eq_ignore_ascii_case(s.trim())) {
-            let spans_range = self.values.len() as i64 == (self.max as i64 - self.min as i64 + 1);
-            return Some(if spans_range { self.min + i as i32 } else { i as i32 });
+        if let Some(i) = self.labels().iter().position(|v| v.eq_ignore_ascii_case(s.trim())) {
+            return Some(if self.labels_span_range() { self.min + i as i32 } else { i as i32 });
         }
-        s.trim().parse().ok()
+        let s = s.trim();
+        let s = self.unit().and_then(|u| s.strip_suffix(u)).unwrap_or(s);
+        s.trim().trim_start_matches('+').parse().ok()
     }
 }
 
@@ -478,6 +513,36 @@ mod tests {
         }
         let level = param("Temp_patch.common.Name").unwrap();
         assert!(level.labels().is_none());
+    }
+
+    #[test]
+    fn fx_units_are_not_labels() {
+        let band = FxParamDef {
+            name: "63Hz",
+            unique_name: "63hz",
+            field: FxField::Param(1),
+            offset: Address::from_linear(7),
+            encoding: Encoding::Int4x4,
+            min: -20,
+            max: 20,
+            init: Init::Num(0),
+            ofs: 32768,
+            factor: 1,
+            values: &["[dB]"],
+            format: None,
+            template: "",
+        };
+        assert_eq!(band.unit(), Some("dB"));
+        assert!(band.labels().is_empty());
+        assert_eq!(band.display(3), "+3dB");
+        assert_eq!(band.display(-20), "-20dB");
+        assert_eq!(band.display(0), "0dB");
+        assert_eq!(band.parse_value("+3dB"), Some(3));
+        assert_eq!(band.parse_value("-4"), Some(-4));
+        let list = FxParamDef { values: &["TRI", "SINE"], min: 0, max: 1, ..band };
+        assert_eq!(list.unit(), None);
+        assert_eq!(list.display(1), "SINE");
+        assert_eq!(list.parse_value("tri"), Some(0));
     }
 
     #[test]
