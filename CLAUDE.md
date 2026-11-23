@@ -34,7 +34,7 @@ Open items, in order:
    target's live value, amber while the pedal changes it, with a bar between MIN and MAX. Unknown whether the pedal
    pushes changes made by EXP/INT PDL/WAVE assigns (footswitch toggles are pushed). Change a target on a scratch
    patch and check MIN/MAX show what the pedal reset them to.
-2. Look at the GUI (Claude can't): Assigns layout, tooltips, option notes under list params.
+2. Look at the GUI: Assigns layout, tooltips, option notes under list params (Claude can now screenshot the app, see below).
 3. Smaller: hide FX params that don't apply in the current mode (e.g. CHORUS `rate-1/-2` only in STEREO modes; see
    how `effect_parameter.js` / chain UI decide visibility); decode
    `led.OnOffState`; Restore from backup (writes; same block order as the librarian); `.tsl` live-set import/export;
@@ -138,7 +138,7 @@ sandbox, writes `extracted/*.json` incl. `tables.json`) and `opengx100-extract` 
     drag, chain edit, setlist write, Temp read or the Tuner tab is active; any WRITE restarts the period. Settings in
     `store::Settings` (`settings.json`).
   - `app/presets.rs` — FX presets (2026-11-23): "Presets ▾" by the effect's name: Save as preset… (name defaults to
-    the patch name), the type's presets (click = load, ✕ = delete), Show presets folder. Files
+    the patch name), the type's presets (click = load, × = delete), Show presets folder. Files
     `<data dir>/presets/<FX TYPE>/<name>.json` (`store::Preset`: type name + `unique_name` → stored value; no
     type/switch/pedal-position). Load = one DT1 per differing param (same as turning knobs); missing or out-of-range
     values keep theirs. Only same-type loads (no Replace). Not yet tried on the pedal.
@@ -195,8 +195,11 @@ sandbox, writes `extracted/*.json` incl. `tables.json`) and `opengx100-extract` 
   verified too (second run; the pedal resets TARGET MIN/MAX when TARGET is written, see Protocol facts). Assign
   decoding verified by reading patch "ANALOG KID" (MAN 2/3 assigns switching BOOSTER/DELAY+/SOLO, CTL 1 → PITCH
   SHIFTER).
-- GUI runs against the pedal; Claude has no screen-capture permission, so nothing visual has been checked by Claude
-  (branched chain diagram only seen with `--sim` demo patches, which have a DIVIDER/SPLITTER/MIXER split).
+- GUI runs against the pedal. Screenshots (2026-11-23): `screencapture -x -o -l <window id>` works; window ids and
+  clicks/drags come from tiny Swift helpers built in the scratchpad (CGWindowListCopyWindowInfo, CGEvent posts);
+  System Events can't move/resize windows (no accessibility). For README images run
+  `HOME=<scratch>/home OPENGX100_TABLES=<scratch>/tables/tables.json opengx100-editor --sim` (a copy of tables.json
+  without docs.json, so no guide text shows, and a throwaway data folder).
 
 ## Protocol facts (learned from BTS's JS and the pedal)
 - `System_common.CurrentPatchNum` (`00 00 00 00`, 4 nibbles) is **0-based** (131 = `User_patch(132)`).

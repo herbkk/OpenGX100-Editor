@@ -281,6 +281,25 @@ pub(super) fn patch_differs(live: &PatchData, stored: &PatchData) -> bool {
     })
 }
 
+/// The PARAMETRIC EQUALIZER setting a Global EQ setting matches (`Setup_efct.IOOutGlobalEqLowCut` →
+/// `low-cut`), when the Global EQ one has no labels of its own: the extractor finds none for LOW CUT and
+/// LOW-MID FREQ, while the effect's are in its table. Only used when the ranges are the same.
+fn peq_twin(p: &ParamDef) -> Option<&'static FxParamDef> {
+    if p.labels().is_some_and(|l| !l.labels.is_empty()) {
+        return None;
+    }
+    let suffix = p.path.strip_prefix("Setup_efct.IOOutGlobalEq")?;
+    let mut unique = String::new();
+    for c in suffix.chars() {
+        if c.is_ascii_uppercase() && !unique.is_empty() {
+            unique.push('-');
+        }
+        unique.push(c.to_ascii_lowercase());
+    }
+    let f = tables::FX_TYPES.iter().find(|t| t.name == "PARAMETRIC EQUALIZER")?.param(&unique)?;
+    (f.min == p.min && f.max == p.max && !f.labels().is_empty()).then_some(f)
+}
+
 impl EditorApp {
     // ------------------------------------------------------------------ writes
 
@@ -465,7 +484,11 @@ impl EditorApp {
     /// A knob or fader for system setting `p`, labelled `label`; writes changes.
     fn sys_scale(&mut self, ui: &mut egui::Ui, p: &ParamDef, label: &str, kind: super::controls::Control) {
         let Some(value) = self.sys_value(p.path) else { return };
-        let display = |v: i32| p.display(v);
+        let twin = peq_twin(p);
+        let display = |v: i32| match twin {
+            Some(f) => f.display(v),
+            None => p.display(v),
+        };
         let scale = super::controls::Scale {
             name: label,
             name_color: ui.visuals().text_color(),

@@ -203,8 +203,14 @@ impl Scale<'_> {
 /// The name, centred at the bottom of a fixed-height area, so the controls of a row line up.
 fn name_area(ui: &mut egui::Ui, width: f32, s: &Scale) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, NAME_H), Sense::hover());
-    let font = FontId::proportional(11.0);
-    let galley = ui.painter().layout(s.name.to_string(), font, s.name_color, width - 4.0);
+    // Shrink the type until the longest word fits, so names wrap between words, never inside one.
+    let fits = |size: f32| {
+        s.name.split_whitespace().all(|w| {
+            ui.painter().layout_no_wrap(w.to_string(), FontId::proportional(size), s.name_color).size().x <= width - 4.0
+        })
+    };
+    let size = [11.0, 10.0, 9.0, 8.0].into_iter().find(|&z| fits(z)).unwrap_or(8.0);
+    let galley = ui.painter().layout(s.name.to_string(), FontId::proportional(size), s.name_color, width - 4.0);
     let pos = pos2(rect.center().x - galley.size().x / 2.0, rect.bottom() - galley.size().y);
     ui.painter().galley(pos, galley, s.name_color);
 }

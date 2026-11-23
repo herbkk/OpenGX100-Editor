@@ -98,7 +98,8 @@ impl EditorApp {
                         ui.close();
                         self.load_preset(slot, &info.preset);
                     }
-                    if ui.small_button("✕").on_hover_text("Delete this preset…").clicked() {
+                    if ui.add(egui::Button::new("×").small().frame(true)).on_hover_text("Delete this preset…").clicked()
+                    {
                         ui.close();
                         self.dialog =
                             Some(Dialog::DeletePreset { path: info.path.clone(), name: info.preset.name.clone() });

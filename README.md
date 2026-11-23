@@ -9,7 +9,7 @@ doing.
 > Corporation. Neither this repository nor the app contains **any code, data or text from Roland**: at first launch
 > the app reads the parameter tables from your own installed copy of BOSS TONE STUDIO (see [Install](#install-macos)).
 
-![Live patch editor (simulated pedal)](docs/images/patch-view.png)
+![Live patch editor with the AIRD PREAMP open: knobs, faders and the signal chain (simulated pedal)](docs/images/patch-view.png)
 
 ## Features
 
@@ -18,11 +18,19 @@ doing.
   and written immediately. The signal chain is drawn with its parallel branch (DIVIDER → A/B → MIXER), each effect in
   the colour BOSS TONE STUDIO gives it (filled when on, outlined when off).
 - **Effects that look like gear**: knobs (value shown below) for amounts and times, faders for levels and graphic EQ
-  bands, toggle switches, radio buttons for short lists. Drag, or rest the pointer on a control and roll the mouse
-  wheel (Shift: fine); double-click resets. PARAMETRIC EQ and the Global EQ get a frequency-response graph with
-  draggable bands and EQ-style sections.
-- **FX presets**: save the settings of any effect block to a file and load them into another patch's block of the same
-  type (Presets ▾ next to the effect's name).
+  bands (on a preamp, SAG/RESONANCE/DIRECT MIX/MIC under the tone knobs), toggle switches, radio buttons for short
+  lists, drop-downs for long ones. Drag up/down (Shift: fine), or rest the pointer on a control and roll the mouse
+  wheel; double-click goes back to the default.
+- **EQ graphs**: PARAMETRIC EQ and the Global EQ (IN/OUT) show their frequency response. Drag the dots to change a
+  band, hover the plot for the frequency and what that range does to a guitar; below it, the bands are laid out like
+  an EQ unit (LOW / LOW-MID / HIGH-MID / HIGH / OUTPUT).
+
+  ![Global EQ: frequency-response graph and EQ sections](docs/images/global-eq.png)
+- **FX presets**: **Presets ▾** next to the effect's name saves the block's settings as a preset and loads one into
+  any block of the same type, in any patch (✓ = matches the current settings). Presets are small JSON files in
+  `presets/<FX TYPE>/` in the data folder, easy to share or back up.
+
+  ![FX presets menu](docs/images/presets.png)
 - **Auto-write**: optionally WRITE the live patch every few minutes when it has changes.
 - **Reconnects by itself** when the pedal is unplugged or switched off and comes back; a log file
   (`logs/editor.log` in the data folder) records what the pedal sent, for bug reports.

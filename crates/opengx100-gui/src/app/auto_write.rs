@@ -59,26 +59,46 @@ impl EditorApp {
     /// The switch and the period, next to the Write… button.
     pub(super) fn auto_write_controls(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.clone();
+        // The header lays out right to left: add the pieces in reverse there, so they read left to right.
+        let rtl = ui.layout().prefer_right_to_left();
         ui.horizontal(|ui| {
-            if let Some(on) = super::controls::switch_labelled(ui, self.settings.auto_write, "Auto-write") {
-                self.settings.auto_write = on;
-                self.auto_write_from = None; // a full period from now
+            let mut order = [0, 1, 2, 3];
+            if rtl {
+                order.reverse();
             }
-            ui.label("every");
-            ui.add(
-                egui::DragValue::new(&mut self.settings.auto_write_minutes).range(MINUTES).suffix(" min").speed(0.2),
-            );
-            if self.settings.auto_write {
-                let left = self
-                    .auto_write_from
-                    .map(|t| self.auto_write_period().saturating_sub(t.elapsed()))
-                    .unwrap_or(self.auto_write_period());
-                let s = left.as_secs();
-                let text = match self.unsaved_changes() {
-                    Some(true) => RichText::new(format!("next in {}:{:02}", s / 60, s % 60)).color(AMBER),
-                    _ => RichText::new("nothing to write").weak(),
-                };
-                ui.label(text);
+            for piece in order {
+                match piece {
+                    0 => {
+                        if let Some(on) = super::controls::switch_labelled(ui, self.settings.auto_write, "Auto-write") {
+                            self.settings.auto_write = on;
+                            self.auto_write_from = None; // a full period from now
+                        }
+                    }
+                    1 => {
+                        ui.label("every");
+                    }
+                    2 => {
+                        ui.add(
+                            egui::DragValue::new(&mut self.settings.auto_write_minutes)
+                                .range(MINUTES)
+                                .suffix(" min")
+                                .speed(0.2),
+                        );
+                    }
+                    _ if self.settings.auto_write => {
+                        let left = self
+                            .auto_write_from
+                            .map(|t| self.auto_write_period().saturating_sub(t.elapsed()))
+                            .unwrap_or(self.auto_write_period());
+                        let s = left.as_secs();
+                        let text = match self.unsaved_changes() {
+                            Some(true) => RichText::new(format!("next in {}:{:02}", s / 60, s % 60)).color(AMBER),
+                            _ => RichText::new("nothing to write").weak(),
+                        };
+                        ui.label(text);
+                    }
+                    _ => {}
+                }
             }
         })
         .response
