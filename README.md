@@ -1,9 +1,8 @@
 # OpenGX100 Editor
 
 An independent, open-source editor for the **BOSS GX-100** guitar effects processor, written in Rust. It talks to the
-pedal over USB MIDI, edits patches live, and adds things the official editor doesn't have: setlists that reorder
-patches on the pedal, a byte-exact backup format compatible with BOSS TONE STUDIO, and a live view of what the pedal is
-doing.
+pedal over USB MIDI, edits patches live, and adds things the official editor doesn't have: setlists, gear-style
+controls with EQ graphs, and presets for single effect blocks.
 
 > **Not affiliated with Roland or BOSS.** "BOSS", "GX-100" and "BOSS TONE STUDIO" are trademarks of Roland
 > Corporation. Neither this repository nor the app contains **any code, data or text from Roland**: at first launch
@@ -11,48 +10,27 @@ doing.
 
 ![Live patch editor with the AIRD PREAMP open: knobs, faders and the signal chain (simulated pedal)](docs/images/patch-view.png)
 
-## Features
+## What it adds
 
-- **Live patch editor**: always shows the patch active on the pedal and follows patch changes, footswitches and the
-  expression pedal (values the pedal changes flash amber). Every patch setting, FX on/off and FX parameter is editable
-  and written immediately. The signal chain is drawn with its parallel branch (DIVIDER → A/B → MIXER), each effect in
-  the colour BOSS TONE STUDIO gives it (filled when on, outlined when off).
-- **Effects that look like gear**: knobs (value shown below) for amounts and times, faders for levels and graphic EQ
-  bands (on a preamp, SAG/RESONANCE/DIRECT MIX/MIC under the tone knobs), toggle switches, radio buttons for short
-  lists, drop-downs for long ones. Drag up/down (Shift: fine), or rest the pointer on a control and roll the mouse
-  wheel; double-click goes back to the default.
-- **EQ graphs**: PARAMETRIC EQ and the Global EQ (IN/OUT) show their frequency response. Drag the dots to change a
-  band, hover the plot for the frequency and what that range does to a guitar; below it, the bands are laid out like
-  an EQ unit (LOW / LOW-MID / HIGH-MID / HIGH / OUTPUT).
+OpenGX100 Editor does what BOSS TONE STUDIO does, and adds:
+
+- **Setlists**: ordered lists of patches. Tick patches, drag to reorder, pick where they go, preview what gets
+  overwritten, then write them to the pedal in one go (every patch is read back and compared). Setlists are saved,
+  keep a copy of each patch, and can be exported and imported.
+- **Graphics**:
+  - Effects that look like gear: knobs (value shown below) for amounts and times, faders for levels and graphic EQ
+    bands, toggle switches, radio buttons for short lists. Drag up/down (Shift: fine), or rest the pointer on a
+    control and roll the mouse wheel; double-click goes back to the default.
+  - EQ graphs: PARAMETRIC EQ and the Global EQ show their frequency response. Drag the dots to change a band, hover
+    the plot for the frequency and what that range does to a guitar; below it, the bands are laid out like an EQ unit
+    (LOW / LOW-MID / HIGH-MID / HIGH / OUTPUT).
 
   ![Global EQ: frequency-response graph and EQ sections](docs/images/global-eq.png)
-- **FX presets**: **Presets ▾** next to the effect's name saves the block's settings as a preset and loads one into
+- **Block presets**: **Presets ▾** next to an effect's name saves that block's settings as a preset and loads one into
   any block of the same type, in any patch (✓ = matches the current settings). Presets are small JSON files in
   `presets/<FX TYPE>/` in the data folder, easy to share or back up.
 
-  ![FX presets menu](docs/images/presets.png)
-- **Auto-write**: optionally WRITE the live patch every few minutes when it has changes.
-- **Reconnects by itself** when the pedal is unplugged or switched off and comes back; a log file
-  (`logs/editor.log` in the data folder) records what the pedal sent, for bug reports.
-- **Chain editing**, as in BOSS TONE STUDIO: drag an effect to move it, click between two blocks to add one, replace
-  or remove the selected effect. A DIVIDER brings its SPLITTER and MIXER, and dragging it moves the whole parallel
-  section. Types that don't fit are greyed out: the editor's limits (15 effects, 9 of a type, 2 preamps, one
-  DIVIDER/PHRASE LOOP/SEND/RETURN) and what the pedal says its DSP can still take.
-- **Tuner**: the pedal's MONO, POLY and TT tuners on screen (note and needle, or one bar per string), with
-  reference pitch, tuner output, instrument type and TT string. The pedal shows its tuner while the tab is open;
-  its tuner footswitch opens and closes the tab.
-- **WRITE / Revert**: store the live patch into any slot (warns before replacing another patch), or drop unsaved edits.
-- **CTL/EXP**: per-control functions (patch or system), and the patch's **20 assigns** with a full editor (target,
-  min/max in the target's units, source, mode, act range, internal/wave pedal, MIDI CC/PC) and a live "now" column.
-- **IN/OUT and System** settings: input setting presets, output select, Global EQ, play options, MIDI, USB audio.
-- **Setlists**: ordered lists of patches, drag to reorder, preview what gets overwritten, then write them to the pedal
-  in one go (every patch is read back and compared).
-- **Backups**: full backup of the system settings and all 200 patches; reads BOSS TONE STUDIO `.alb` backups too.
-- **Descriptions** (optional, for now only when building from source): parameter, option and effect explanations
-  from Roland's online parameter guide, downloaded on your machine.
-- **Command-line tool** (`opengx100`) and an in-memory **simulated pedal** for trying everything without hardware.
-
-![Assign editor](docs/images/assigns.png)
+  ![Block presets menu](docs/images/presets.png)
 
 ## Status
 
