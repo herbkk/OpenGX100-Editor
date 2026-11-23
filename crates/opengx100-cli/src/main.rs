@@ -1,4 +1,4 @@
-//! `opengx100` — a small command-line tool for the BOSS GX-100.
+//! `opengx100` - a small command-line tool for BOSS guitar processors (GX-100, GX-10).
 
 #[cfg(feature = "midi")]
 use opengx100_midi as midi;
@@ -15,7 +15,7 @@ use std::error::Error;
 use std::time::Duration;
 
 const USAGE: &str = "\
-opengx100 — command-line tool for the BOSS GX-100
+opengx100 - command-line tool for BOSS guitar processors (GX-100, GX-10)
 
 USAGE: opengx100 [--port <name>] [--sim] [--allow-system] <command> [args]
 
@@ -48,11 +48,12 @@ Talking to the pedal (or the simulator with --sim):
                                set an FX parameter (label or number)
 
 Options:
-  --port <name>    MIDI port to use (substring; default: \"GX-100\")
+  --port <name>    MIDI port to use (substring; default: the pedal's name)
   --sim            use an in-memory simulated pedal instead of MIDI
   --allow-system   let `set` write outside the live patch (system settings)
-  --bts <path>     BOSS TONE STUDIO for GX-100.app to read the parameter tables from
-                   (default: found in /Applications; read once, then cached)
+  --bts <path>     BOSS TONE STUDIO to read the parameter tables from: the app bundle, its .exe
+                   or the folder holding its html files (default: found in /Applications;
+                   read once, then cached)
 
 Writes only touch the live patch: nothing is saved to a memory slot, so
 switching patches on the pedal discards them.";
@@ -98,7 +99,7 @@ fn load_tables(o: &Opts) {
         Err(e) => eprintln!("warning: {e}. Using the synthetic test tables: real pedals won't make sense."),
     }
     if *tables::SOURCE == TablesSource::Fixture && std::env::var_os("OPENGX100_TABLES").is_none() {
-        eprintln!("(install BOSS TONE STUDIO for GX-100, or point --bts at it)");
+        eprintln!("(install BOSS TONE STUDIO, or point --bts at it)");
     }
 }
 
@@ -179,7 +180,8 @@ fn connect(o: &Opts) -> Res<Device<Conn>> {
     let mut dev = Device::new(conn);
     let id = dev.identify()?;
     println!(
-        "GX-100 found: device id {:02X}, revision {}",
+        "{} found: device id {:02X}, revision {}",
+        opengx100_protocol::tables::PRODUCT.name,
         id.device_id,
         id.revision.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
     );
@@ -580,6 +582,7 @@ fn write_check<T: Transport>(dev: &mut Device<T>) -> Res {
             println!("    pedal sent {}  {:<24} {}", n.addr, hex.join(" "), describe(n.addr, n.data.len(), &types));
         }
         let t = d.read_patch(patch::temp_patch())?;
+        print_changes(&live, &t);
         check("chain rewritten with itself (chain edit)", differing_settings(&t, &live).is_empty())?;
 
         let t = d.read_patch(patch::temp_patch())?;
