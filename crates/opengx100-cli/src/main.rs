@@ -496,7 +496,7 @@ fn write_check<T: Transport>(dev: &mut Device<T>) -> Res {
     println!("current patch: {n} {name:?}");
     // Re-selecting the patch reloads the stored copy and WRITE stores the live one, so both are
     // no-ops only while the live patch has no unsaved changes.
-    let diff = differing_blocks(&temp, &stored);
+    let diff = differing_settings(&temp, &stored);
     let clean = diff.is_empty();
     if clean {
         println!("live patch is identical to the stored copy: every write below changes nothing");
@@ -515,13 +515,13 @@ fn write_check<T: Transport>(dev: &mut Device<T>) -> Res {
         if clean {
             d.select_patch(n)?;
             let t = d.read_patch(patch::temp_patch())?;
-            check(&format!("select patch {n} (CurrentPatchNum)"), differing_blocks(&t, &stored).is_empty())?;
+            check(&format!("select patch {n} (CurrentPatchNum)"), differing_settings(&t, &stored).is_empty())?;
             check("  …still on the same patch", d.read_param(cur)? == ParamValue::Num(n as i32 - 1))?;
             d.save_temp_patch(n, &name)?;
             let s = d.read_patch(user)?;
             check(
                 &format!("WRITE live patch onto patch {n} (PATCH_WRITE, confirmed)"),
-                differing_blocks(&s, &stored).is_empty(),
+                differing_settings(&s, &stored).is_empty(),
             )?;
         }
 
