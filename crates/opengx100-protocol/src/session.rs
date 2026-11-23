@@ -280,11 +280,15 @@ impl<T: Transport> Device<T> {
     }
 
     /// Waits until the pedal accepts reads again. It doesn't right after a patch change or a write;
-    /// like the official editor, ask `IS_RQ1_ACCEPT` every 250 ms, for up to 10 s.
+    /// like the official editor, ask `IS_RQ1_ACCEPT` every 250 ms, for up to 10 s. A question that
+    /// goes unanswered means the pedal is still busy, not that it can't be asked: after `PATCH_WRITE`
+    /// the GX-10 stops answering for a while.
     pub fn wait_until_ready(&mut self) -> Result<()> {
         for _ in 0..40 {
-            if self.rq1_accepted()? {
-                return Ok(());
+            match self.rq1_accepted() {
+                Ok(true) => return Ok(()),
+                Ok(false) | Err(Error::Timeout(_)) => {}
+                Err(e) => return Err(e),
             }
             std::thread::sleep(Duration::from_millis(250));
         }
