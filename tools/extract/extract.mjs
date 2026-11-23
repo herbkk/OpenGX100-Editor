@@ -19,9 +19,18 @@ const html = (() => {
   const mac = path.join(appPath, 'Contents/Resources/html');
   return fs.existsSync(path.join(mac, 'js/config/product_setting.js')) ? mac : appPath;
 })();
-// The editor's UI definition: bg777 on the GX-100, bg846 on the GX-10.
-const elf = fs.readdirSync(html).find((f) => /^bg\d+-pc\.elf$/.test(f));
-if (!elf) throw new Error(`no bg*-pc.elf in ${html}`);
+// The editor's UI definition: bg777 on the GX-100, bg846 on the GX-10. The GX-100's install also carries
+// bg709-pc.elf (another model) and it comes first in the folder, so the product's name picks; a lone
+// bg*-pc.elf is taken as it is, and several unknown ones are refused (no labels beat another model's).
+const elf = (() => {
+  const setting = fs.readFileSync(path.join(html, 'js/config/product_setting.js'), 'utf8');
+  const product = (setting.match(/\bname:\s*'([^']+)'/) || [])[1];
+  const known = { 'GX-100': 'bg777-pc.elf', 'GX-10': 'bg846-pc.elf' }[product];
+  if (known && fs.existsSync(path.join(html, known))) return known;
+  const found = fs.readdirSync(html).filter((f) => /^bg\d+-pc\.elf$/.test(f));
+  return found.length === 1 ? found[0] : undefined;
+})();
+if (!elf) throw new Error(`no UI definition for the pedal in ${html}`);
 
 // core.js defines extractTables() and tablesBundle(); run it here, the official editor's scripts in a sandbox.
 vm.runInThisContext(fs.readFileSync(new URL('./core.js', import.meta.url), 'utf8'), { filename: 'core.js' });

@@ -138,6 +138,7 @@ fn windows_apps() -> impl Iterator<Item = PathBuf> {
 /// The spread of one zip inside another file: (start, end) of the archive. The .exe carries its own data after
 /// the archive, so the end-of-central-directory record is not at the end: locate it, then work out where the
 /// archive starts.
+#[cfg(any(windows, test))]
 fn carve(bytes: &[u8]) -> Option<(usize, usize)> {
     const EOCD: &[u8] = b"PK\x05\x06";
     let eocd = bytes.windows(EOCD.len()).rposition(|w| w == EOCD)?;
